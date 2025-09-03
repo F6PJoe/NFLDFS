@@ -10,7 +10,7 @@ on:
     - cron: '0 16 * * 3-6'
 
     # Wed-Sat: 8 PM ET (00:00 UTC next day)
-    - cron: '0 0 * * 4-7'
+    - cron: '0 0 * * 4-6,0'
 
     # Sunday: 8 AM–11 AM ET every 30 minutes (12:00–14:59 UTC)
     - cron: '0,30 12-14 * * 0'
@@ -53,4 +53,4 @@ jobs:
       env:
         GCP_SHEETS_KEY_B64: ${{ secrets.GCP_SHEETS_KEY_B64 }}
       run: |
-        Rscript "NFL DFS.R"
+        Rscript "NFLDFS.R"

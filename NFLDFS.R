@@ -32,13 +32,24 @@ get_processed_slate <- function(api_url) {
   
   # Find slate column containing "MAIN" or fallback
   text_cols <- names(slates)[sapply(slates, is.character)]
-  slate_col <- text_cols[which(sapply(text_cols, function(col) any(grepl("MAIN", slates[[col]], ignore.case = TRUE))))]
-  if (length(slate_col) == 0) {
-    slate_col <- text_cols[which(sapply(text_cols, function(col) any(grepl("ALL|ALL DAY", slates[[col]], ignore.case = TRUE))))]
-  }
-  if (length(slate_col) == 0) stop("No matching slate found.")
+  # slate_col <- text_cols[which(sapply(text_cols, function(col) any(grepl("MAIN", slates[[col]], ignore.case = TRUE))))]
+  # if (length(slate_col) == 0) {
+  #   slate_col <- text_cols[which(sapply(text_cols, function(col) any(grepl("ALL|ALL DAY", slates[[col]], ignore.case = TRUE))))]
+  # }
+  # if (length(slate_col) == 0) stop("No matching slate found.")
+  # 
+  # slate_index <- which(grepl("MAIN|ALL|ALL DAY", slates[[slate_col[1]]], ignore.case = TRUE))[1]
   
-  slate_index <- which(grepl("MAIN|ALL|ALL DAY", slates[[slate_col[1]]], ignore.case = TRUE))[1]
+  # Select slate with most players (most rows)
+  slate_sizes <- sapply(data$slates$info, function(slate_df) {
+    if (is.data.frame(slate_df) || is.list(slate_df)) {
+      return(nrow(as.data.frame(slate_df)))
+    }
+    return(0)
+  })
+  slate_index <- which.max(slate_sizes)
+  message("Using slate with ", slate_sizes[slate_index], " players.")
+  
   df <- data$slates$info[[slate_index]]
   names(df) <- c("Opp", "Player", "ID", "Pos", "Team", "Proj", "Salary", "Beta", "Value")
   
@@ -79,3 +90,4 @@ formatted_time <- format(update_time, "%I:%M %p ET")
 
 range_write(ss = gs_url_time, data = data.frame(Date = formatted_date), sheet = "NFL Update Time", range = "A2", col_names = FALSE)
 range_write(ss = gs_url_time, data = data.frame(Time = formatted_time), sheet = "NFL Update Time", range = "B2", col_names = FALSE)
+

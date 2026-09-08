@@ -20,6 +20,17 @@ temp_json_file <- tempfile(fileext = ".json")
 writeLines(json_key, temp_json_file)
 gs4_auth(path = temp_json_file)
 
+gs_url <- "https://docs.google.com/spreadsheets/d/1dWsEg3HLa9KY1YES31P1Mam0vLFK9zrR91rOsDSKsA8/"
+
+# Read last known update time from Google Sheet
+last_updated_sheet <- tryCatch({
+  val <- range_read(ss = gs_url, sheet = "NFL Update Time", range = "B2", col_names = FALSE)
+  as.character(val[[1]][1])
+}, error = function(e) {
+  message("Could not read last update time from sheet: ", e$message)
+  NULL
+})
+
 # Helper function to fetch and process slate data
 get_processed_slate <- function(api_url) {
   response <- GET(api_url, add_headers(
@@ -28,6 +39,8 @@ get_processed_slate <- function(api_url) {
   ))
   data <- content(response, "parsed", simplifyVector = TRUE)
   slates <- data$slates
+
+  current_updated <- slates$updated[1]
 
   text_cols <- names(slates)[sapply(slates, is.character)]
 
@@ -75,7 +88,7 @@ get_processed_slate <- function(api_url) {
 
   if (nrow(df) == 0) {
     warning("Slate index ", slate_index, " (", slates$slate[slate_index], ") has no players with valid projections yet. Returning empty data frame.")
-    return(df)
+    return(list(df = df, updated = current_updated))
   }
 
   # Handle multi-position players
@@ -86,26 +99,41 @@ get_processed_slate <- function(api_url) {
   df$Pos[dualPos]  <- sub("/", "", str_extract(df$Pos[dualPos], "^[A-Z0-9]{1,2}/"))
   df$Pos1 <- df$Pos
   df$Pos  <- df$OptPos
-  arrange(df, desc(Proj))
+
+  list(df = arrange(df, desc(Proj)), updated = current_updated)
 }
 
 # Fetch FD and DK data
-fd <- get_processed_slate("https://bluecollardfs.com/api/nfl_fanduel")
-dk <- get_processed_slate("https://bluecollardfs.com/api/nfl_draftkings")
+fd_result <- get_processed_slate("https://bluecollardfs.com/api/nfl_fanduel")
+dk_result <- get_processed_slate("https://bluecollardfs.com/api/nfl_draftkings")
 
-# Google Sheets write URLs
-gs_url_fd   <- "https://docs.google.com/spreadsheets/d/1dWsEg3HLa9KY1YES31P1Mam0vLFK9zrR91rOsDSKsA8/"
-gs_url_dk   <- gs_url_fd
-gs_url_time <- gs_url_fd
+fd <- fd_result$df
+dk <- dk_result$df
 
-# Write FD and DK data to their respective sheets
-sheet_write(fd[, c("Player", "Proj", "Salary", "Value", "Pos", "Team", "Opp")], sheet = "FD NFL DFS", ss = gs_url_fd)
-sheet_write(dk[, c("Player", "Proj", "Salary", "Value", "Pos", "Team", "Opp")], sheet = "DK NFL DFS", ss = gs_url_dk)
+# Use FD updated time as the source of truth (both sites update together)
+api_updated <- fd_result$updated
+message("API last updated: ", api_updated)
+message("Sheet last updated: ", last_updated_sheet)
 
-# Write timestamp to Google Sheets
-update_time    <- with_tz(Sys.time(), "America/New_York")
-formatted_date <- format(update_time, "%B %d, %Y")
-formatted_time <- format(update_time, "%I:%M %p ET")
+if (!is.null(last_updated_sheet) && api_updated == last_updated_sheet) {
+  message("Data unchanged since last run. Skipping Google Sheets update.")
+} else {
+  message("New data detected. Writing to Google Sheets.")
 
-range_write(ss = gs_url_time, data = data.frame(Date = formatted_date), sheet = "NFL Update Time", range = "A2", col_names = FALSE)
-range_write(ss = gs_url_time, data = data.frame(Time = formatted_time), sheet = "NFL Update Time", range = "B2", col_names = FALSE)
+  if (nrow(fd) > 0) {
+    sheet_write(fd[, c("Player", "Proj", "Salary", "Value", "Pos", "Team", "Opp")], sheet = "FD NFL DFS", ss = gs_url)
+  }
+  if (nrow(dk) > 0) {
+    sheet_write(dk[, c("Player", "Proj", "Salary", "Value", "Pos", "Team", "Opp")], sheet = "DK NFL DFS", ss = gs_url)
+  }
+
+  # Only update timestamp if we actually wrote data
+  if (nrow(fd) > 0 || nrow(dk) > 0) {
+    update_time    <- with_tz(Sys.time(), "America/New_York")
+    formatted_date <- format(update_time, "%B %d, %Y")
+    formatted_time <- format(update_time, "%I:%M %p ET")
+
+    range_write(ss = gs_url, data = data.frame(Date = formatted_date), sheet = "NFL Update Time", range = "A2", col_names = FALSE)
+    range_write(ss = gs_url, data = data.frame(Time = formatted_time), sheet = "NFL Update Time", range = "B2", col_names = FALSE)
+  }
+}

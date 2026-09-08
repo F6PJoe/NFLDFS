@@ -67,9 +67,14 @@ get_processed_slate <- function(api_url) {
             " with ", player_counts[slate_index], " players.")
   }
 
-  df <- data$slates$info[[slate_index]]
+  # Guard: no slate data available yet
+  raw <- data$slates$info[[slate_index]]
+  if (is.null(raw) || !is.data.frame(raw) || nrow(raw) == 0) {
+    message("No slate data available yet for ", api_url, ". Skipping.")
+    return(list(df = data.frame(), updated = current_updated))
+  }
 
-  df <- df %>% rename(
+  df <- raw %>% rename(
     Opp    = opponent,
     Player = name,
     ID     = site_id,
@@ -88,7 +93,7 @@ get_processed_slate <- function(api_url) {
 
   if (nrow(df) == 0) {
     warning("Slate index ", slate_index, " (", slates$slate[slate_index], ") has no players with valid projections yet. Returning empty data frame.")
-    return(list(df = df, updated = current_updated))
+    return(list(df = data.frame(), updated = current_updated))
   }
 
   # Handle multi-position players

@@ -115,12 +115,14 @@ dk_result <- get_processed_slate("https://bluecollardfs.com/api/nfl_draftkings")
 fd <- fd_result$df
 dk <- dk_result$df
 
-# Use FD updated time as the source of truth (both sites update together)
+# Use FD updated time as the source of truth
 api_updated <- fd_result$updated
 message("API last updated: ", api_updated)
 message("Sheet last updated: ", last_updated_sheet)
 
-if (!is.null(last_updated_sheet) && api_updated == last_updated_sheet) {
+if (is.null(api_updated) || is.na(api_updated)) {
+  message("No API update time available. Skipping Google Sheets update.")
+} else if (!is.null(last_updated_sheet) && api_updated == last_updated_sheet) {
   message("Data unchanged since last run. Skipping Google Sheets update.")
 } else {
   message("New data detected. Writing to Google Sheets.")
@@ -132,7 +134,6 @@ if (!is.null(last_updated_sheet) && api_updated == last_updated_sheet) {
     sheet_write(dk[, c("Player", "Proj", "Salary", "Value", "Pos", "Team", "Opp")], sheet = "DK NFL DFS", ss = gs_url)
   }
 
-  # Only update timestamp if we actually wrote data
   if (nrow(fd) > 0 || nrow(dk) > 0) {
     update_time    <- with_tz(Sys.time(), "America/New_York")
     formatted_date <- format(update_time, "%B %d, %Y")

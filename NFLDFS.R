@@ -2,89 +2,89 @@
 cat("\014")
 rm(list = ls())
 
-# Required packages
 packages <- c(
   "XML", "RCurl", "stringr", "rjson", "plyr", "dplyr", "httr",
   "jsonlite", "magrittr", "googlesheets4", "googledrive",
   "lubridate", "base64enc"
 )
+invisible(lapply(packages, library, character.only = TRUE))
 
-for (pkg in packages) {
-  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
-  library(pkg, character.only = TRUE)
-}
-
-# Decode Google Sheets credentials from env var and authenticate
 json_key <- rawToChar(base64decode(Sys.getenv("GCP_SHEETS_KEY_B64")))
 temp_json_file <- tempfile(fileext = ".json")
 writeLines(json_key, temp_json_file)
 gs4_auth(path = temp_json_file)
 
-gs_url <- "https://docs.google.com/spreadsheets/d/1dWsEg3HLa9KY1YES31P1Mam0vLFK9zrR91rOsDSKsA8/"
+gs_url <- "https://docs.google.com/spreadsheets/d/1dWsEg3HLa9KY1YES31P1Mam0vLFK9zrR91rOsDSKsA8"
 
-# Read last known update time from Google Sheet
-last_updated_sheet <- tryCatch({
-  val <- range_read(ss = gs_url, sheet = "NFL Update Time", range = "B2", col_names = FALSE)
-  as.character(val[[1]][1])
-}, error = function(e) {
-  message("Could not read last update time from sheet: ", e$message)
-  NULL
-})
+get_processed_slate <- function(api_url, label) {
+  api_key <- paste0("ApiKey ", Sys.getenv("BCDFS_API_KEY"))
 
-# Helper function to fetch and process slate data
-get_processed_slate <- function(api_url) {
-  response <- GET(api_url, add_headers(
-    Authorization = "FantasySixPack",
-    `Content-Type` = "application/json"
-  ))
-  data <- content(response, "parsed", simplifyVector = TRUE)
+  response <- tryCatch(
+    GET(api_url, add_headers(Authorization = api_key, `Content-Type` = "application/json")),
+    error = function(e) { message(label, " API request failed: ", e$message); return(NULL) }
+  )
+  if (is.null(response)) return(NULL)
+
+  # Parse as text first then fromJSON to preserve array structure
+  raw <- content(response, "text", encoding = "UTF-8")
+  data <- tryCatch(
+    fromJSON(raw, simplifyVector = FALSE),
+    error = function(e) { message(label, " failed to parse response: ", e$message); return(NULL) }
+  )
+  if (is.null(data)) return(NULL)
+
   slates <- data$slates
-
-  current_updated <- slates$updated[1]
-
-  text_cols <- names(slates)[sapply(slates, is.character)]
-
-  slate_index <- NA
-  for (col in text_cols) {
-    idx <- which(grepl("MAIN", slates[[col]], ignore.case = TRUE))[1]
-    if (!is.na(idx)) { slate_index <- idx; break }
+  if (is.null(slates) || length(slates) == 0) {
+    message(label, " — no slates available yet. Skipping.")
+    return(NULL)
   }
 
+  # Print all slate names for diagnostics
+  slate_names <- sapply(slates, function(s) s$slate)
+  message(label, " — slates available: ", paste(slate_names, collapse = " | "))
+
+  # Find MAIN slate
+  slate_index <- which(grepl("MAIN", slate_names, ignore.case = TRUE))[1]
+
+  # Fallback to ALL DAY / ALL
   if (is.na(slate_index)) {
-    for (col in text_cols) {
-      idx <- which(grepl("ALL DAY|ALL", slates[[col]], ignore.case = TRUE))[1]
-      if (!is.na(idx)) { slate_index <- idx; break }
-    }
+    slate_index <- which(grepl("ALL DAY|ALL", slate_names, ignore.case = TRUE))[1]
   }
 
+  # Fallback to largest slate
   if (is.na(slate_index)) {
-    player_counts <- sapply(seq_along(data$slates$info), function(i) {
-      info <- data$slates$info[[i]]
-      if (is.data.frame(info)) nrow(info) else 0
-    })
+    player_counts <- sapply(slates, function(s) length(s$info))
     slate_index <- which.max(player_counts)
-    message("No MAIN/ALL DAY slate found. Using slate index ", slate_index,
-            " with ", player_counts[slate_index], " players.")
+    message(label, " — no MAIN/ALL DAY slate found. Using largest: '",
+            slate_names[slate_index], "' with ", player_counts[slate_index], " players.")
   }
 
-  # Guard: no slate data available yet
-  raw <- data$slates$info[[slate_index]]
-  if (is.null(raw) || !is.data.frame(raw) || nrow(raw) == 0) {
-    message("No slate data available yet for ", api_url, ". Skipping.")
-    return(list(df = data.frame(), updated = current_updated))
+  selected <- slates[[slate_index]]
+  message(label, " — selected slate: '", selected$slate, "' updated: ", selected$updated)
+
+  info <- selected$info
+  if (is.null(info) || length(info) == 0) {
+    message(label, " — slate exists but contains no player data. Skipping.")
+    return(NULL)
   }
 
-  df <- raw %>% rename(
+  # Convert list of players to data frame
+  df <- bind_rows(lapply(info, as.data.frame, stringsAsFactors = FALSE))
+
+  # Rename using actual API field names from docs
+  df <- dplyr::rename(df,
     Opp    = opponent,
     Player = name,
-    ID     = site_id,
     Pos    = position,
     Team   = team,
     Proj   = projection,
     Salary = salary,
-    Beta   = beta_proj,
     Value  = value
   )
+
+  # Optional fields that may not always exist
+  if ("site_id" %in% names(df))  df <- dplyr::rename(df, ID   = site_id)
+  if ("beta_proj" %in% names(df)) df <- dplyr::rename(df, Beta = beta_proj)
 
   df$Proj   <- round(as.numeric(df$Proj), 2)
   df$Salary <- as.numeric(df$Salary)
@@ -92,54 +92,60 @@ get_processed_slate <- function(api_url) {
   df <- df[!is.na(df$Proj) & df$Proj > 0, ]
 
   if (nrow(df) == 0) {
-    warning("Slate index ", slate_index, " (", slates$slate[slate_index], ") has no players with valid projections yet. Returning empty data frame.")
-    return(list(df = data.frame(), updated = current_updated))
+    message(label, " — slate found but no players have valid projections yet. Skipping.")
+    return(NULL)
   }
 
   # Handle multi-position players
   df$OptPos <- df$Pos
-  dualPos <- grepl("/", df$Pos)
-  df$Pos2 <- ""
+  dualPos   <- grepl("/", df$Pos)
+  df$Pos2   <- ""
   df$Pos2[dualPos] <- sub("/", "", str_extract(df$Pos[dualPos], "/[A-Z0-9]{1,2}$"))
   df$Pos[dualPos]  <- sub("/", "", str_extract(df$Pos[dualPos], "^[A-Z0-9]{1,2}/"))
   df$Pos1 <- df$Pos
   df$Pos  <- df$OptPos
+  df <- arrange(df, desc(Proj))
 
-  list(df = arrange(df, desc(Proj)), updated = current_updated)
+  message(label, " — slate loaded with ", nrow(df), " players.")
+  return(df)
 }
 
-# Fetch FD and DK data
-fd_result <- get_processed_slate("https://bluecollardfs.com/api/nfl_fanduel")
-dk_result <- get_processed_slate("https://bluecollardfs.com/api/nfl_draftkings")
+write_placeholder <- function(sheet_name, site_label) {
+  range_clear(ss = gs_url, sheet = sheet_name, range = "A2:Z1000")
+  range_write(
+    ss        = gs_url,
+    data      = data.frame(Message = paste0(site_label, " Projections for today's games will be coming soon")),
+    sheet     = sheet_name,
+    range     = "A2",
+    col_names = FALSE
+  )
+  message(site_label, " — placeholder message written to ", sheet_name, ".")
+}
 
-fd <- fd_result$df
-dk <- dk_result$df
-
-# Use FD updated time as the source of truth
-api_updated <- fd_result$updated
-message("API last updated: ", api_updated)
-message("Sheet last updated: ", last_updated_sheet)
-
-if (is.null(api_updated) || is.na(api_updated)) {
-  message("No API update time available. Skipping Google Sheets update.")
-} else if (!is.null(last_updated_sheet) && api_updated == last_updated_sheet) {
-  message("Data unchanged since last run. Skipping Google Sheets update.")
+# --- FanDuel ---
+fd <- get_processed_slate("https://bluecollardfs.com/api/nfl_fanduel", "FanDuel")
+if (!is.null(fd)) {
+  sheet_write(fd[, c("Player", "Proj", "Salary", "Value", "Pos", "Team", "Opp")], sheet = "FD NFL DFS", ss = gs_url)
+  message("FanDuel data written to Google Sheets.")
 } else {
-  message("New data detected. Writing to Google Sheets.")
-
-  if (nrow(fd) > 0) {
-    sheet_write(fd[, c("Player", "Proj", "Salary", "Value", "Pos", "Team", "Opp")], sheet = "FD NFL DFS", ss = gs_url)
-  }
-  if (nrow(dk) > 0) {
-    sheet_write(dk[, c("Player", "Proj", "Salary", "Value", "Pos", "Team", "Opp")], sheet = "DK NFL DFS", ss = gs_url)
-  }
-
-  if (nrow(fd) > 0 || nrow(dk) > 0) {
-    update_time    <- with_tz(Sys.time(), "America/New_York")
-    formatted_date <- format(update_time, "%B %d, %Y")
-    formatted_time <- format(update_time, "%I:%M %p ET")
-
-    range_write(ss = gs_url, data = data.frame(Date = formatted_date), sheet = "NFL Update Time", range = "A2", col_names = FALSE)
-    range_write(ss = gs_url, data = data.frame(Time = formatted_time), sheet = "NFL Update Time", range = "B2", col_names = FALSE)
-  }
+  write_placeholder("FD NFL DFS", "FanDuel")
 }
+
+# --- DraftKings ---
+dk <- get_processed_slate("https://bluecollardfs.com/api/nfl_draftkings", "DraftKings")
+if (!is.null(dk)) {
+  sheet_write(dk[, c("Player", "Proj", "Salary", "Value", "Pos", "Team", "Opp")], sheet = "DK NFL DFS", ss = gs_url)
+  message("DraftKings data written to Google Sheets.")
+} else {
+  write_placeholder("DK NFL DFS", "DraftKings")
+}
+
+# --- Timestamp ---
+update_time    <- with_tz(Sys.time(), "America/New_York")
+formatted_date <- format(update_time, "%B %d, %Y")
+formatted_time <- format(update_time, "%I:%M %p ET")
+range_write(ss = gs_url, data = data.frame(Date = formatted_date), sheet = "NFL Update Time", range = "A2", col_names = FALSE)
+range_write(ss = gs_url, data = data.frame(Time = formatted_time), sheet = "NFL Update Time", range = "B2", col_names = FALSE)
+message("Timestamp updated: ", formatted_date, " ", formatted_time)
+
+if (!interactive()) quit(status = 0)
